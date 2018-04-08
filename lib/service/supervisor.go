@@ -62,8 +62,16 @@ type Supervisor interface {
 
 	// WaitForEvent waits for event to be broadcasted, if the event
 	// was already broadcasted, payloadC will receive current event immediately
-	// CLose 'cancelC' channel to force WaitForEvent to return prematurely
+	// Close 'cancelC' channel to force WaitForEvent to return prematurely
 	WaitForEvent(name string, eventC chan Event, cancelC chan struct{})
+
+	// Exiting channel will be closed when
+	// TeleportExitEvent will be broadcasted by any caller
+	Exiting() <-chan struct{}
+
+	// Reloading channel will be closed when
+	// TeleportReloadEvent will be broadcasted by any caller
+	Reloading() <-chan struct{}
 }
 
 type LocalSupervisor struct {
@@ -75,13 +83,25 @@ type LocalSupervisor struct {
 	events       map[string]Event
 	eventsC      chan Event
 	eventWaiters map[string][]*waiter
+
 	closeContext context.Context
 	signalClose  context.CancelFunc
+
+	// exitContext is closed when someone emits Exit event
+	exitContext context.Context
+	signalExit  context.CancelFunc
+
+	reloadContext context.Context
+	signalReload  context.CancelFunc
 }
 
 // NewSupervisor returns new instance of initialized supervisor
 func NewSupervisor() Supervisor {
 	closeContext, cancel := context.WithCancel(context.TODO())
+
+	exitContext, signalExit := context.WithCancel(context.TODO())
+	reloadContext, signalReload := context.WithCancel(context.TODO())
+
 	srv := &LocalSupervisor{
 		services:     []Service{},
 		wg:           &sync.WaitGroup{},
@@ -90,6 +110,12 @@ func NewSupervisor() Supervisor {
 		eventWaiters: make(map[string][]*waiter),
 		closeContext: closeContext,
 		signalClose:  cancel,
+
+		exitContext: exitContext,
+		signalExit:  signalExit,
+
+		reloadContext: reloadContext,
+		signalReload:  signalReload,
 	}
 	go srv.fanOut()
 	return srv
@@ -201,9 +227,25 @@ func (s *LocalSupervisor) Run() error {
 	return s.Wait()
 }
 
+func (s *LocalSupervisor) Exiting() <-chan struct{} {
+	return s.exitContext.Done()
+}
+
+func (s *LocalSupervisor) Reloading() <-chan struct{} {
+	return s.reloadContext.Done()
+}
+
 func (s *LocalSupervisor) BroadcastEvent(event Event) {
 	s.Lock()
 	defer s.Unlock()
+
+	switch event.Name {
+	case TeleportExitEvent:
+		s.signalExit()
+	case TeleportReloadEvent:
+		s.signalReload()
+	}
+
 	s.events[event.Name] = event
 	log.WithFields(logrus.Fields{"event": event.String()}).Debugf("Broadcasting event.")
 
