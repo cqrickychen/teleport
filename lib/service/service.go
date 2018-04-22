@@ -118,9 +118,9 @@ const (
 	// to reload its configuration
 	TeleportReloadEvent = "TeleportReload"
 
-	// TeleportStartEvent is generated when the Teleport process starts
+	// TeleportReadyEvent is generated when the Teleport process starts
 	// successfully
-	TeleportStartEvent = "TeleportStart"
+	TeleportReadyEvent = "TeleportReady"
 )
 
 // RoleConfig is a configuration for a server role (either proxy or node)
@@ -320,6 +320,9 @@ type Process interface {
 	// Shutdown starts graceful shutdown of the process,
 	// blocks until all resources are associated
 	Shutdown(context.Context)
+	// WaitForEvent waits for event to occur, sends
+	// event to the channel
+	WaitForEvent(ctx context.Context, name string, eventC chan Event)
 }
 
 // NewProcess is a function that creates new teleport from config
@@ -338,43 +341,73 @@ func Run(ctx context.Context, cfg Config, newTeleport NewProcess) error {
 	copyCfg := cfg
 	srv, err := newTeleport(&copyCfg)
 	if err != nil {
-		return trace.Wrap(err, "Initialization failed")
+		return trace.Wrap(err, "initialization failed")
 	}
 	if err := srv.Start(); err != nil {
-		return trace.Wrap(err, "Startup Failed")
+		return trace.Wrap(err, "startup Failed")
 	}
-wait:
-	err = srv.WaitForSignals(ctx)
+	// wait and reload until called exit
+	for {
+		srv, err = waitAndReload(ctx, cfg, srv, newTeleport)
+		if err != nil {
+			// this error means that was a clean shutdown
+			// an no reload is necessary
+			if err == errTeleportExited {
+				return nil
+			}
+			return trace.Wrap(err)
+		}
+	}
+}
+
+func waitAndReload(ctx context.Context, cfg Config, srv Process, newTeleport NewProcess) (Process, error) {
+	err := srv.WaitForSignals(ctx)
+	if err == nil {
+		return nil, errTeleportExited
+	}
 	if err != ErrTeleportReloading {
-		return trace.Wrap(err)
+		return nil, trace.Wrap(err)
 	}
+	log.Infof("Started in-process service reload.")
 	fileDescriptors, err := srv.ExportFileDescriptors()
 	if err != nil {
 		warnOnErr(srv.Close())
-		return trace.Wrap(err)
+		return nil, trace.Wrap(err)
 	}
 	newCfg := cfg
 	newCfg.FileDescriptors = fileDescriptors
 	newSrv, err := newTeleport(&newCfg)
 	if err != nil {
 		warnOnErr(srv.Close())
-		return trace.Wrap(err, "Reload failed")
+		return nil, trace.Wrap(err, "failed to create a new service")
 	}
 	if err := newSrv.Start(); err != nil {
 		warnOnErr(srv.Close())
-		return trace.Wrap(err, "Startup of a reloaded process failed")
+		return nil, trace.Wrap(err, "failed to start a new service")
 	}
+
+	// wait for new server to report that it has started
+	// before shutting down the old one
+	startTimeoutCtx, startCancel := context.WithTimeout(ctx, signalPipeTimeout)
+	defer startCancel()
+	eventC := make(chan Event, 1)
+	newSrv.WaitForEvent(startTimeoutCtx, TeleportReadyEvent, eventC)
+	select {
+	case <-eventC:
+		log.Infof("New service has started successfully. Shutting down the old service.")
+	case <-startTimeoutCtx.Done():
+		warnOnErr(srv.Close())
+		return nil, trace.Wrap(err, "the new service has failed to start")
+	}
+	// After the new process has started, initiate the graceful shutdown of the old process
 	timeoutCtx, cancel := context.WithTimeout(ctx, defaults.DefaultIdleConnectionDuration*2)
 	defer cancel()
-	// TODO(klizhentas) wait until services are declared as started, before shutting down
-	// this one, otherwise some requests may fail
 	srv.Shutdown(timeoutCtx)
 	if timeoutCtx.Err() == context.DeadlineExceeded {
 		warnOnErr(srv.Close())
-		return trace.Wrap(err, "Failed to shutdown the parent process")
+		return nil, trace.Wrap(err, "failed to shutdown the old service")
 	}
-	srv = newSrv
-	goto wait
+	return newSrv, nil
 }
 
 // NewTeleport takes the daemon configuration, instantiates all required services
@@ -469,6 +502,22 @@ func NewTeleport(cfg *Config) (*TeleportProcess, error) {
 		cfg.Keygen = native.New()
 	}
 
+	// Produce global TeleportReadyEvent
+	// when all components have started
+	eventMapping := EventMapping{
+		Out: TeleportReadyEvent,
+	}
+	if cfg.Auth.Enabled {
+		eventMapping.In = append(eventMapping.In, AuthTLSReady)
+	}
+	if cfg.SSH.Enabled {
+		eventMapping.In = append(eventMapping.In, NodeSSHReady)
+	}
+	if cfg.Proxy.Enabled {
+		eventMapping.In = append(eventMapping.In, ProxySSHReady)
+	}
+	process.RegisterEventMapping(eventMapping)
+
 	if cfg.Auth.Enabled {
 		if err := process.initAuthService(); err != nil {
 			return nil, trace.Wrap(err)
@@ -488,6 +537,7 @@ func NewTeleport(cfg *Config) (*TeleportProcess, error) {
 	}
 
 	if cfg.Proxy.Enabled {
+		eventMapping.In = append(eventMapping.In, ProxySSHReady)
 		if err := process.initProxy(); err != nil {
 			return nil, err
 		}
@@ -514,14 +564,34 @@ func NewTeleport(cfg *Config) (*TeleportProcess, error) {
 		defer f.Close()
 	}
 
+	// notify parent process that this process has started
+	go process.notifyParent()
+
+	return process, nil
+}
+
+// prociess notifies parent process that this process has started
+// by writing to in-memory pipe used by communication channel
+func (process *TeleportProcess) notifyParent() {
+	ctx, cancel := context.WithTimeout(process.ExitContext(), signalPipeTimeout)
+	defer cancel()
+
+	eventC := make(chan Event, 1)
+	process.WaitForEvent(ctx, TeleportReadyEvent, eventC)
+	select {
+	case <-eventC:
+		log.Infof("New service has started successfully. Shutting down the old service.")
+	case <-ctx.Done():
+		log.Errorf("Timeout waiting for process to start: %v", ctx.Err())
+		return
+	}
+
 	if err := process.writeToSignalPipe(fmt.Sprintf("Process %v has started.", os.Getpid())); err != nil {
 		log.Warningf("Failed to write to signal pipe: %v", err)
 		// despite the failure, it's ok to proceed,
 		// it could mean that the parent process has crashed and the pipe
 		// is no longer valid.
 	}
-
-	return process, nil
 }
 
 func (process *TeleportProcess) setLocalAuth(a *auth.AuthServer) {
@@ -809,7 +879,7 @@ func (process *TeleportProcess) initAuthService() error {
 		return nil
 	})
 
-	closeContext, signalClose := context.WithCancel(context.TODO())
+	closeContext, signalClose := context.WithCancel(process.ExitContext())
 
 	process.RegisterFunc("auth.heartbeat", func() error {
 		srv := services.ServerV2{
@@ -910,7 +980,7 @@ func payloadContext(payload interface{}) context.Context {
 func (process *TeleportProcess) onExit(serviceName string, callback func(interface{})) {
 	process.RegisterFunc(serviceName, func() error {
 		eventC := make(chan Event)
-		process.WaitForEvent(TeleportExitEvent, eventC, make(chan struct{}))
+		process.WaitForEvent(context.TODO(), TeleportExitEvent, eventC)
 		select {
 		case event := <-eventC:
 			callback(event.Payload)
@@ -954,7 +1024,7 @@ func (process *TeleportProcess) getRotation(role teleport.Role) (*services.Rotat
 func (process *TeleportProcess) initSSH() error {
 	process.registerWithAuthServer(teleport.RoleNode, SSHIdentityEvent)
 	eventsC := make(chan Event)
-	process.WaitForEvent(SSHIdentityEvent, eventsC, make(chan struct{}))
+	process.WaitForEvent(process.ExitContext(), SSHIdentityEvent, eventsC)
 
 	var s *regular.Server
 
@@ -963,8 +1033,15 @@ func (process *TeleportProcess) initSSH() error {
 	})
 
 	process.RegisterFunc("ssh.node", func() error {
-		event := <-eventsC
-		log.Infof("Received event %q.", event.Name)
+		var event Event
+		select {
+		case event = <-eventsC:
+			log.Debugf("Received event %q.", event.Name)
+		case <-process.ExitContext().Done():
+			log.Debugf("Process is exiting.")
+			return nil
+		}
+
 		conn, ok := (event.Payload).(*Connector)
 		if !ok {
 			return trace.BadParameter("unsupported connector type: %T", event.Payload)
@@ -1241,10 +1318,17 @@ func (process *TeleportProcess) initProxy() error {
 	process.registerWithAuthServer(teleport.RoleProxy, ProxyIdentityEvent)
 	process.RegisterFunc("proxy.init", func() error {
 		eventsC := make(chan Event)
-		process.WaitForEvent(ProxyIdentityEvent, eventsC, make(chan struct{}))
+		process.WaitForEvent(process.ExitContext(), ProxyIdentityEvent, eventsC)
 
-		event := <-eventsC
-		log.Debugf("Received event %q.", event.Name)
+		var event Event
+		select {
+		case event = <-eventsC:
+			log.Debugf("Received event %q.", event.Name)
+		case <-process.ExitContext().Done():
+			log.Debugf("Process is exiting")
+			return nil
+		}
+
 		conn, ok := (event.Payload).(*Connector)
 		if !ok {
 			return trace.BadParameter("unsupported connector type: %T", event.Payload)

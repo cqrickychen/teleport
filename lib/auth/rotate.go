@@ -116,7 +116,6 @@ type rotationReq struct {
 
 // RotateCertAuthority starts or restarts certificate rotation process
 func (a *AuthServer) RotateCertAuthority(req RotateRequest) error {
-	// TODO: For whatever reason rotation does not work on DynamoDB - getting error.
 	if err := req.CheckAndSetDefaults(a.clock); err != nil {
 		return trace.Wrap(err)
 	}

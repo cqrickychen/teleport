@@ -23,7 +23,6 @@ func (process *TeleportProcess) connectToAuthService(role teleport.Role) (*Conne
 }
 
 func (process *TeleportProcess) connect(role teleport.Role) (*Connector, error) {
-	// TODO (klizhentas) migrations should create state here
 	state, err := process.storage.GetState(role)
 	if err != nil {
 		if !trace.IsNotFound(err) {
@@ -205,7 +204,7 @@ func (process *TeleportProcess) firstTimeConnect(role teleport.Role) (*Connector
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	log.Infof("%v has successfully wrote credentials and state to disk..", role)
+	log.Infof("%v has successfully wrote credentials and state to disk.", role)
 	return connector, nil
 }
 
@@ -219,13 +218,17 @@ func (process *TeleportProcess) periodicSyncRotationState() error {
 		case <-t.C:
 			needsReload, err := process.syncRotationState()
 			if err != nil {
-				log.Warningf("Failed to sync rotation state: %v", trace.DebugReport(err))
+				if trace.IsConnectionProblem(err) {
+					log.Warningf("Connection problem: sync rotation state: %v", err)
+				} else {
+					log.Warningf("Failed to sync rotation state: %v", err)
+				}
 			} else if needsReload {
-				// TODO: set context?
 				process.BroadcastEvent(Event{Name: TeleportReloadEvent})
 				return nil
 			}
-		case <-process.Exiting():
+		case <-process.ExitContext().Done():
+			log.Infof("Periodic rotation syncer has exited.")
 			return nil
 		}
 	}
