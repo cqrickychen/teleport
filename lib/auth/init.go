@@ -371,7 +371,45 @@ func migrateLegacyResources(cfg InitConfig, asrv *AuthServer) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
+	err = migrateIdentities(cfg.DataDir)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	return nil
+}
 
+func migrateIdentities(dataDir string) error {
+	storage, err := NewProcessStorage(filepath.Join(dataDir, teleport.ComponentProcess))
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	for _, role := range []teleport.Role{teleport.RoleAdmin, teleport.RoleProxy, teleport.RoleNode} {
+		if err := migrateIdentity(role, dataDir, storage); err != nil {
+			return trace.Wrap(err)
+		}
+	}
+	return nil
+}
+
+func migrateIdentity(role teleport.Role, dataDir string, storage *ProcessStorage) error {
+	identity, err := readIdentityCompat(dataDir, IdentityID{Role: role})
+	if err != nil {
+		if !trace.IsNotFound(err) {
+			return trace.Wrap(err)
+		}
+		return nil
+	}
+	err = storage.WriteIdentity(IdentityCurrent, *identity)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	err = removeIdentityCompat(dataDir, IdentityID{Role: role})
+	if err != nil {
+		if !trace.IsNotFound(err) {
+			return trace.Wrap(err)
+		}
+	}
+	log.Infof("Identity %v has been migrated to new on-disk format.", role)
 	return nil
 }
 
@@ -704,11 +742,25 @@ func ReadLocalIdentity(dataDir string, id IdentityID) (*Identity, error) {
 }
 
 // DELETE IN(2.7.0)
+// removeIdentityCompat removes identity from disk
+func removeIdentityCompat(dataDir string, id IdentityID) error {
+	path := keysPath(dataDir, id)
+	for _, filePath := range []string{path.key, path.sshCert, path.tlsCert, path.tlsCACert} {
+		err := trace.ConvertSystemError(os.Remove(filePath))
+		if err != nil {
+			if !trace.IsNotFound(err) {
+				return trace.Wrap(err)
+			}
+		}
+	}
+	return nil
+}
+
+// DELETE IN(2.7.0)
 // readIdentityCompat reads, parses and returns the given pub/pri key + cert from the
 // key storage (dataDir). Used for data migrations
 func readIdentityCompat(dataDir string, id IdentityID) (i *Identity, err error) {
 	path := keysPath(dataDir, id)
-	log.Debugf("Reading keys from disk: %v.", path)
 
 	keyBytes, err := utils.ReadPath(path.key)
 	if err != nil {
