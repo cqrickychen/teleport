@@ -104,7 +104,7 @@ func ReadJSON(r *http.Request, val interface{}) error {
 func ConvertResponse(re *roundtrip.Response, err error) (*roundtrip.Response, error) {
 	if err != nil {
 		if uerr, ok := err.(*url.Error); ok && uerr != nil && uerr.Err != nil {
-			return nil, trace.ConnectionProblem(uerr.Err, "failed connecting to endpoint")
+			return nil, trace.ConnectionProblem(uerr.Err, uerr.Error())
 		}
 		return nil, trace.ConvertSystemError(err)
 	}

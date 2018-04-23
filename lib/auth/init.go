@@ -798,28 +798,7 @@ func readIdentityCompat(dataDir string, id IdentityID) (i *Identity, err error) 
 	return identity, nil
 }
 
-// HaveHostKeys checks that host keys are in place
-func HaveHostKeys(dataDir string, id IdentityID) (bool, error) {
-	path := keysPath(dataDir, id)
-
-	exists, err := pathExists(path.key)
-	if !exists || err != nil {
-		return exists, err
-	}
-
-	exists, err = pathExists(path.sshCert)
-	if !exists || err != nil {
-		return exists, err
-	}
-
-	exists, err = pathExists(path.tlsCert)
-	if !exists || err != nil {
-		return exists, err
-	}
-
-	return true, nil
-}
-
+// DELETE IN(2.7.0)
 type paths struct {
 	dataDir   string
 	key       string
@@ -828,6 +807,7 @@ type paths struct {
 	tlsCACert string
 }
 
+// DELETE IN(2.7.0)
 // keysPath returns two full file paths: to the host.key and host.cert
 func keysPath(dataDir string, id IdentityID) paths {
 	return paths{
@@ -836,15 +816,4 @@ func keysPath(dataDir string, id IdentityID) paths {
 		tlsCert:   filepath.Join(dataDir, fmt.Sprintf("%s.tlscert", strings.ToLower(string(id.Role)))),
 		tlsCACert: filepath.Join(dataDir, fmt.Sprintf("%s.tlscacert", strings.ToLower(string(id.Role)))),
 	}
-}
-
-func pathExists(path string) (bool, error) {
-	_, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }
