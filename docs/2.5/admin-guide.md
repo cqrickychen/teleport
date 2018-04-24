@@ -1029,15 +1029,15 @@ spec:
 
 Here's the list of resources currently exposed via `tctl`:
 
-Resource Kind      | Description
--------------------|--------------
-user               | A user record in the internal Teleport user DB.
-node               | A registered SSH node. The same record is displayed via `tctl nodes ls`
-trusted_cluster    | A trusted cluster. See [here](#trusted-clusters) for more details on connecting clusters together.
-role               | A role assumed by users. The open source Teleport only includes one role: "admin", but Enterprise teleport users can define their own roles.
-saml               | A SAML auth connector. ([Teleport Enterprise](ssh_sso/) only).
-oidc               | An OIDC auth connector. ([Teleport Enterprise](ssh_sso/) only).
-github             | A Github auth connector. See [here](#github-auth-connector) for details on configuring it.
+Resource Kind   | Description
+----------------|--------------
+user            | A user record in the internal Teleport user DB.
+node            | A registered SSH node. The same record is displayed via `tctl nodes ls`
+cluster         | A trusted cluster. See [here](#trusted-clusters) for more details on connecting clusters together.
+role            | A role assumed by users. The open source Teleport only includes one role: "admin", but Enterprise teleport users can define their own roles.
+saml            | A SAML auth connector. ([Teleport Enterprise](ssh_sso/) only).
+oidc            | An OIDC auth connector. ([Teleport Enterprise](ssh_sso/) only).
+github          | A Github auth connector. See [here](#github-auth-connector) for details on configuring it.
 
 
 ### Examples:
@@ -1058,29 +1058,46 @@ $ tctl rm users/admin
 
 ## Trusted Clusters
 
-Teleport allows to partition your infrastructure into multiple clusters. Some clusters can be
-located behind firewalls without any open ports. They can also have their own restrictions on
-which users have access.
+As explained in the [architecture document](architecture/#core-concepts),
+Teleport allows to partition a compute infrastructure into multiple clusters,
+where each cluster is represented by its own _auth server_ and a _proxy
+server_.
 
-A Teleport Cluster has a name and is managed by a
-`teleport` daemon with "auth service" enabled.
+The concept of _trusted clusters_ allows Teleport administrators to connect
+multiple clusters together and establish trust between them. Trusted clusters
+allow users of one cluster to seamlessly SSH into the nodes of another cluster
+without having to re-login. The user experience will look like this:
 
-Let's assume we need to access servers behind a firewall and we only want Teleport
-user "john" to have access to them. We already have our primary Teleport cluster and our
-users set up. Say this primary cluster is called `main`, and the behind-the-firewall cluster
-is called `east` as shown on this diagram:
+```bash
+# login using the "main" cluster credentials:
+$ tsh login --proxy=main.example.com
+
+# SSH into some host inside the "main" cluster:
+$ tsh ssh host
+
+# SSH into the host located in another cluster called "east"
+$ tsh --cluster=east ssh host
+
+# See what other clusters are available
+$ tsh clusters
+```
+
+Trusted clusters also have their own restrictions on user access, i.e.
+_permissions mapping_ takes place. Moreover, the deployment of trusted clusters
+("east" in the example above) allows them to be located behind firewalls
+without any open ports:
 
 ![Tunels](img/tunnel.svg)
 
 This setup works as follows:
 
-1. "East" creates an outbound reverse SSH tunnel to "main" and keeps it open.
-2. "East" and "main" must trust each other, they are "trusted clusters" because
-   "main" must authenticate "east" (cluster-to-cluster authentication) when the
-   tunnel is established, and "east" must trust users connecting from "main"
-   (user authentication).
-3. Users of "main" must use `tsh --cluster=east` flag if they want to connect to any nodes in "east".
-4. Users of "main" can see other trusted clusters connected to "main" by running `tsh clusters`
+1. "East" creates an outbound reverse SSH tunnel to "main" and keeps this
+   connection open.
+2. From east's perspective, "main" is the _trusted cluster_ because "east"
+   must allow users from "main" to access its nodes.
+3. When a user tries to connect to a node inside "east" using
+   _main.example.com_ the reverse tunnel from step 1 is used to establish this
+   connection (green line).
 
 ### Example Configuration
 

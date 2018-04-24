@@ -1,17 +1,17 @@
-# Dynamic Trusted Clusters
+# Trusted Clusters
 
-Dynamic Trusted Clusters can be used to configure Trusted Clusters in more
-powerful ways than standard file configuration. If you have not already read the
-documentation about [Trusted Clusters](admin-guide.md#trusted-clusters) from
-Teleport, it would be helpful to review before continuing.
+The concept of Trusted Clusters allows Teleport administrators to connect
+multiple Teleport clusters together, letting users of one cluster to seamlessly
+SSH into the nodes of another cluster without having to re-login.
 
-Some of the features Dynamic Trusted Clusters have:
+If you haven't already looked at the introduction to [Trusted Clusters](admin-guide.md#trusted-clusters) 
+it would be helpful to go over it before continuing with this guide.
 
-* Add and remove Trusted Clusters without needing to restart Teleport.
-* Enable/Disable Trusted Clusters from the Web UI.
-* More sophisticated role mapping which allows you to map roles you have on your
-  main cluster (which are encoded within your SSH certificate) to the role you
-  assume when you connect to a node within the Trusted Cluster.
+This guide covers the following topics:
+
+* How to add and remove trusted clusters using CLI commands.
+* Enable/disable trust between clusters.
+* Establish permissions mapping using Teleport roles.
 
 Below we will provide two example configurations. A simple configuration that
 you can use to quickly get started with Trusted Clusters and a more
